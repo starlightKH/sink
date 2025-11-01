@@ -3,19 +3,32 @@ const serverUrlInput = document.getElementById('server-url');
 const roomIdInput = document.getElementById('room-id');
 const statusText = document.getElementById('status-text');
 const disconnectButton = document.getElementById('disconnect-button');
+const connectButton = document.getElementById('connect-button');
 const tabSelect = document.getElementById('tab-select');
 const refreshTabsButton = document.getElementById('refresh-tabs');
+const roleInputs = Array.from(document.querySelectorAll('input[name="user-role"]'));
+const hostToolsSection = document.getElementById('host-tools');
+const hostAddressText = document.getElementById('host-address');
+const hostStatusText = document.getElementById('host-status');
+const hostRefreshButton = document.getElementById('host-refresh');
+const hostCopyButton = document.getElementById('host-copy');
 
 const statusLabels = {
-  disconnected: '연결되지 않음',
-  connecting: '연결 중',
-  connected: '연결됨',
-  error: '오류 발생'
+  disconnected: 'Not connected',
+  connecting: 'Connecting',
+  connected: 'Connected',
+  error: 'Error'
 };
+
+const HOST_PORT = 8080;
+const DEFAULT_HOST_SERVER_URL = `ws://localhost:${HOST_PORT}`;
 
 let selectedTabId = null;
 let latestSyncTarget = null;
 let isRefreshingTabs = false;
+let currentRole = 'guest';
+let hostAddress = null;
+let currentConnectionStatus = 'disconnected';
 
 function sendMessage(message) {
   return new Promise((resolve, reject) => {
@@ -37,7 +50,7 @@ function sendMessage(message) {
 function getStoredState() {
   return new Promise((resolve) => {
     try {
-      chrome.storage.local.get(['connection', 'syncTarget'], (stored) => {
+      chrome.storage.local.get(['connection', 'syncTarget', 'userRole', 'hostAccess'], (stored) => {
         resolve(stored);
       });
     } catch (error) {
@@ -47,7 +60,11 @@ function getStoredState() {
 }
 
 function updateStatus(status) {
-  statusText.textContent = statusLabels[status] || status || '상태 알 수 없음';
+  currentConnectionStatus = status || 'disconnected';
+  statusText.textContent = statusLabels[status] || status || 'Status unknown';
+  if (connectButton) {
+    connectButton.disabled = currentConnectionStatus === 'connected' || currentConnectionStatus === 'connecting';
+  }
 }
 
 function applySyncTarget(target) {
@@ -59,6 +76,129 @@ function applySyncTarget(target) {
     selectedTabId = null;
   }
   void refreshTabs();
+}
+
+function applyHostAccess(access) {
+  if (!access || !access.publicUrl) {
+    hostAddress = null;
+    if (hostAddressText) {
+      hostAddressText.textContent = 'Resolve the external address to share with guests.';
+    }
+    if (hostStatusText && currentRole === 'host') {
+      hostStatusText.textContent = 'Click refresh to fetch the latest address.';
+    }
+    return;
+  }
+  hostAddress = access.publicUrl;
+  if (hostAddressText) {
+    hostAddressText.textContent = hostAddress;
+  }
+  if (hostStatusText) {
+    hostStatusText.textContent = 'Share this address (IP:8080) with guests.';
+  }
+}
+
+function updateRoleUI(role) {
+  currentRole = role;
+  roleInputs.forEach((input) => {
+    input.checked = input.value === role;
+  });
+  const isHost = role === 'host';
+  serverUrlInput.disabled = isHost;
+  if (isHost) {
+    if (!serverUrlInput.value) {
+      serverUrlInput.value = DEFAULT_HOST_SERVER_URL;
+    }
+    hostToolsSection.hidden = false;
+    if (hostStatusText) {
+      hostStatusText.textContent = hostAddress
+        ? 'Share this address (IP:8080) with guests.'
+        : currentConnectionStatus === 'connected'
+          ? 'Click refresh to fetch the latest address.'
+          : 'Connect to the server before refreshing.';
+    }
+    if (!hostAddress) {
+      void refreshHostAddress(false);
+    }
+  } else {
+    serverUrlInput.disabled = false;
+    if (serverUrlInput.value === DEFAULT_HOST_SERVER_URL) {
+      serverUrlInput.value = '';
+    }
+    hostToolsSection.hidden = true;
+    hostAddress = null;
+    if (hostAddressText) {
+      hostAddressText.textContent = 'Resolve the external address to share with guests.';
+    }
+    if (hostStatusText) {
+      hostStatusText.textContent = '';
+    }
+  }
+}
+
+async function refreshHostAddress(forceRefresh = false) {
+  if (currentRole !== 'host') {
+    return;
+  }
+  if (currentConnectionStatus !== 'connected') {
+    if (!hostAddress && hostAddressText) {
+      hostAddressText.textContent = 'Resolve the external address to share with guests.';
+    }
+    if (hostStatusText) {
+      hostStatusText.textContent = 'Connect to the server before refreshing.';
+    }
+    return;
+  }
+  if (hostAddressText) {
+    hostAddressText.textContent = 'Resolving external address...';
+  }
+  if (hostStatusText) {
+    hostStatusText.textContent = 'Resolving external address...';
+  }
+  try {
+    const response = await sendMessage({
+      type: 'getHostAddress',
+      forceRefresh
+    });
+    if (response?.ok) {
+      const resolvedUrl = response.publicUrl || hostAddress;
+      hostAddress = resolvedUrl || hostAddress;
+      if (resolvedUrl && hostAddressText) {
+        hostAddressText.textContent = resolvedUrl;
+      }
+      if (hostStatusText) {
+        hostStatusText.textContent = 'Share this address (IP:8080) with guests.';
+      }
+    } else {
+      hostAddress = null;
+      if (hostAddressText) {
+        hostAddressText.textContent = 'Unable to resolve external address.';
+      }
+      if (hostStatusText) {
+        const error = response?.error;
+        if (error === 'not-connected') {
+          hostStatusText.textContent = 'Connect to the server before refreshing.';
+        } else if (error === 'timeout') {
+          hostStatusText.textContent = 'Timed out while resolving the address. Try again.';
+        } else if (error === 'send-failed') {
+          hostStatusText.textContent = 'Unable to send request to the server.';
+        } else if (error === 'superseded') {
+          hostStatusText.textContent = 'Previous request cancelled.';
+        } else {
+          hostStatusText.textContent = 'Check your network connection or firewall and try again.';
+        }
+      }
+    }
+  } catch (error) {
+    console.warn('Failed to resolve host address', error);
+    hostAddress = null;
+    if (hostAddressText) {
+      hostAddressText.textContent = 'Unable to resolve external address.';
+    }
+    if (hostStatusText) {
+      hostStatusText.textContent = 'An error occurred while resolving the address.';
+    }
+  }
 }
 
 async function refreshTabs() {
@@ -75,14 +215,14 @@ async function refreshTabs() {
     tabSelect.innerHTML = '';
     const placeholder = document.createElement('option');
     placeholder.value = '';
-    placeholder.textContent = '탭을 선택하세요';
+    placeholder.textContent = 'Select a tab';
     tabSelect.appendChild(placeholder);
 
     let selectionFound = false;
     for (const tab of tabs) {
       const option = document.createElement('option');
       option.value = String(tab.id);
-      option.textContent = tab.title || tab.url || `탭 ${tab.id}`;
+      option.textContent = tab.title || tab.url || `Tab ${tab.id}`;
       option.dataset.url = tab.url || '';
       if (selectedTabId !== null && tab.id === selectedTabId) {
         option.selected = true;
@@ -95,7 +235,7 @@ async function refreshTabs() {
       if (latestSyncTarget) {
         const missingOption = document.createElement('option');
         missingOption.value = String(latestSyncTarget.tabId);
-        missingOption.textContent = `${latestSyncTarget.title || latestSyncTarget.url || '선택된 탭'} (사용 불가)`;
+        missingOption.textContent = `${latestSyncTarget.title || latestSyncTarget.url || 'Selected tab'} (unavailable)`;
         missingOption.disabled = true;
         tabSelect.appendChild(missingOption);
       }
@@ -110,7 +250,7 @@ async function refreshTabs() {
         ? tabSelect.selectedOptions[0].dataset.url
         : '';
   } catch (error) {
-    console.warn('탭 목록을 불러오지 못했습니다.', error);
+    console.warn('Unable to load tab list', error);
   } finally {
     isRefreshingTabs = false;
   }
@@ -128,7 +268,7 @@ form.addEventListener('submit', async (event) => {
   try {
     await sendMessage({ type: 'connect', serverUrl, roomId });
   } catch (error) {
-    console.warn('연결 요청 실패', error);
+    console.warn('Failed to submit connect request', error);
     updateStatus('error');
   }
 });
@@ -153,16 +293,15 @@ tabSelect.addEventListener('change', async () => {
         applySyncTarget(null);
       } else {
         selectedTabId = tabId;
-        // 최신 syncTarget 정보는 background에서 전달됩니다.
       }
     } else {
       throw response;
     }
   } catch (error) {
     if (error && error.error === 'permission-denied') {
-      statusText.textContent = '탭 권한 요청이 취소되었습니다';
+      statusText.textContent = 'Tab permission request was denied';
     } else if (error && error.error === 'tab-not-found') {
-      statusText.textContent = '선택한 탭을 찾을 수 없습니다';
+      statusText.textContent = 'The selected tab could not be found';
     } else {
       updateStatus('error');
     }
@@ -175,12 +314,78 @@ refreshTabsButton.addEventListener('click', () => {
   void refreshTabs();
 });
 
+roleInputs.forEach((input) => {
+  input.addEventListener('change', () => {
+    if (input.checked) {
+      void setRole(input.value);
+    }
+  });
+});
+
+async function setRole(role) {
+  if (currentRole === role) {
+    return;
+  }
+  updateRoleUI(role);
+  try {
+    await sendMessage({ type: 'setRole', role });
+  } catch (error) {
+    console.warn('Failed to update role', error);
+  }
+}
+
+if (hostRefreshButton) {
+  hostRefreshButton.addEventListener('click', () => {
+    void refreshHostAddress(true);
+  });
+}
+
+if (hostCopyButton) {
+  hostCopyButton.addEventListener('click', async () => {
+    if (currentRole !== 'host') {
+      return;
+    }
+    if (!hostAddress) {
+      if (currentConnectionStatus === 'connected') {
+        await refreshHostAddress(true);
+      }
+      if (!hostAddress) {
+        if (hostStatusText) {
+          hostStatusText.textContent = 'Resolve the address before copying.';
+        }
+        return;
+      }
+    }
+    try {
+      await navigator.clipboard.writeText(hostAddress);
+      if (hostStatusText) {
+        hostStatusText.textContent = 'Address copied to the clipboard.';
+      }
+    } catch (error) {
+      console.warn('Failed to copy host address', error);
+      if (hostStatusText) {
+        hostStatusText.textContent = 'Unable to copy to the clipboard.';
+      }
+    }
+  });
+}
+
 chrome.runtime.onMessage.addListener((message) => {
   if (message.type === 'connectionStatus') {
     updateStatus(message.status);
+    if (message.hostAccess) {
+      applyHostAccess(message.hostAccess);
+    }
+    if (message.role) {
+      updateRoleUI(message.role);
+    }
     if (message.syncTarget) {
       applySyncTarget(message.syncTarget);
     }
+  } else if (message.type === 'roleChanged') {
+    updateRoleUI(message.role);
+  } else if (message.type === 'hostAccessUpdate') {
+    applyHostAccess(message.hostAccess);
   } else if (message.type === 'syncTarget') {
     applySyncTarget(message.target);
   }
@@ -200,6 +405,12 @@ sendMessage({ type: 'getStatus' })
       }
       if (response.syncTarget) {
         applySyncTarget(response.syncTarget);
+      }
+      if (response.hostAccess) {
+        applyHostAccess(response.hostAccess);
+      }
+      if (response.role) {
+        updateRoleUI(response.role);
       }
     }
   })
@@ -223,9 +434,18 @@ async function loadInitialSettings() {
       updateStatus(status);
     }
   }
+  if (stored?.hostAccess) {
+    applyHostAccess(stored.hostAccess);
+  }
+  if (stored?.userRole) {
+    updateRoleUI(stored.userRole);
+  }
   if (stored?.syncTarget) {
     applySyncTarget(stored.syncTarget);
   } else {
     void refreshTabs();
+  }
+  if (currentRole === 'host' && !hostAddress) {
+    void refreshHostAddress(false);
   }
 }

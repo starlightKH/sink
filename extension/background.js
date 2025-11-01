@@ -10,6 +10,20 @@ let reconnectTimer = null;
 const pendingMessages = [];
 const DEFAULT_SYNC_TARGET = { tabId: null, title: null, url: null };
 let syncTarget = { ...DEFAULT_SYNC_TARGET };
+const HEARTBEAT_INTERVAL_MS = 20000;
+const HEARTBEAT_TIMEOUT_MS = 10000;
+const DEFAULT_ROLE = 'guest';
+const HOST_PORT = 8080;
+const HOST_ADDRESS_TTL = 5 * 60 * 1000;
+let heartbeatTimer = null;
+let heartbeatTimeout = null;
+let userRole = DEFAULT_ROLE;
+let hostAccessCache = {
+  publicIp: null,
+  publicUrl: null,
+  fetchedAt: 0
+};
+let hostAddressRequest = null;
 
 function safeRuntimeMessage(message) {
   try {
@@ -26,7 +40,9 @@ function safeRuntimeMessage(message) {
 function persistState() {
   chrome.storage.local.set({
     connection: { ...connectionInfo, status: connectionState },
-    syncTarget
+    syncTarget,
+    userRole,
+    hostAccess: hostAccessCache
   }).catch(() => {});
 }
 
@@ -52,7 +68,14 @@ function flushQueue() {
 function updateStatus(status, details = {}) {
   connectionState = status;
   persistState();
-  safeRuntimeMessage({ type: 'connectionStatus', status, details, syncTarget });
+  safeRuntimeMessage({
+    type: 'connectionStatus',
+    status,
+    details,
+    syncTarget,
+    role: userRole,
+    hostAccess: hostAccessCache
+  });
 }
 
 function getOriginPattern(url) {
@@ -120,6 +143,101 @@ function clearSyncTarget(reason) {
   broadcastSyncTarget(reason);
 }
 
+function stopHeartbeat() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+  if (heartbeatTimeout) {
+    clearTimeout(heartbeatTimeout);
+    heartbeatTimeout = null;
+  }
+}
+
+function sendHeartbeat() {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  try {
+    socket.send(JSON.stringify({ type: 'ping', ts: Date.now() }));
+    if (heartbeatTimeout) {
+      clearTimeout(heartbeatTimeout);
+    }
+    heartbeatTimeout = setTimeout(() => {
+      console.warn('Heartbeat timeout, reconnecting');
+      heartbeatTimeout = null;
+      try {
+        socket.close(4002, 'heartbeat-timeout');
+      } catch (error) {
+        console.warn('Failed to close socket after heartbeat timeout', error);
+      }
+    }, HEARTBEAT_TIMEOUT_MS);
+  } catch (error) {
+    console.warn('Failed to send heartbeat', error);
+  }
+}
+
+function startHeartbeat() {
+  stopHeartbeat();
+  sendHeartbeat();
+  heartbeatTimer = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
+}
+
+function updateHostAccessCache(partial, reason = 'update') {
+  hostAccessCache = {
+    publicIp: partial.publicIp ?? hostAccessCache.publicIp,
+    publicUrl: partial.publicUrl ?? hostAccessCache.publicUrl,
+    fetchedAt: partial.fetchedAt ?? hostAccessCache.fetchedAt
+  };
+  persistState();
+  safeRuntimeMessage({ type: 'hostAccessUpdate', hostAccess: hostAccessCache, reason });
+}
+
+function isHostAccessFresh(forceRefresh = false) {
+  if (forceRefresh) {
+    return false;
+  }
+  if (!hostAccessCache.publicUrl || !hostAccessCache.fetchedAt) {
+    return false;
+  }
+  return Date.now() - hostAccessCache.fetchedAt < HOST_ADDRESS_TTL;
+}
+
+function clearHostAddressRequest(result) {
+  if (!hostAddressRequest) {
+    return;
+  }
+  clearTimeout(hostAddressRequest.timeout);
+  const resolver = hostAddressRequest.resolve;
+  hostAddressRequest = null;
+  resolver(result);
+}
+
+function requestHostAddressFromServer(forceRefresh = false) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    return Promise.resolve({ ok: false, error: 'not-connected' });
+  }
+  if (hostAddressRequest) {
+    clearHostAddressRequest({ ok: false, error: 'superseded' });
+  }
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      if (hostAddressRequest && hostAddressRequest.resolve === resolve) {
+        hostAddressRequest = null;
+        resolve({ ok: false, error: 'timeout' });
+      }
+    }, 5000);
+    hostAddressRequest = { resolve, timeout };
+    try {
+      socket.send(JSON.stringify({ type: 'requestHostAddress', forceRefresh }));
+    } catch (error) {
+      clearTimeout(timeout);
+      hostAddressRequest = null;
+      resolve({ ok: false, error: 'send-failed' });
+    }
+  });
+}
+
 async function setSyncedTab(tabId) {
   if (tabId === null || tabId === undefined) {
     clearSyncTarget('cleared');
@@ -151,6 +269,8 @@ function connect(serverUrl, roomId) {
     return;
   }
 
+  stopHeartbeat();
+
   if (socket) {
     socket.close();
     socket = null;
@@ -167,12 +287,14 @@ function connect(serverUrl, roomId) {
   try {
     socket = new WebSocket(serverUrl);
   } catch (error) {
+    stopHeartbeat();
     updateStatus('error', { message: error.message });
     return;
   }
 
   socket.addEventListener('open', () => {
     updateStatus('connected');
+    startHeartbeat();
     enqueueMessage({
       type: 'join',
       roomId,
@@ -184,6 +306,13 @@ function connect(serverUrl, roomId) {
   socket.addEventListener('message', async (event) => {
     try {
       const data = JSON.parse(event.data);
+      if (data.type === 'pong') {
+        if (heartbeatTimeout) {
+          clearTimeout(heartbeatTimeout);
+          heartbeatTimeout = null;
+        }
+        return;
+      }
       handleServerMessage(data);
     } catch (error) {
       console.warn('Failed to parse server message', error);
@@ -193,6 +322,10 @@ function connect(serverUrl, roomId) {
   socket.addEventListener('close', () => {
     const shouldReconnect = connectionInfo.serverUrl && connectionInfo.roomId;
     updateStatus('disconnected');
+    stopHeartbeat();
+    if (hostAddressRequest) {
+      clearHostAddressRequest({ ok: false, error: 'connection-closed' });
+    }
     if (shouldReconnect) {
       reconnectTimer = setTimeout(() => {
         connect(connectionInfo.serverUrl, connectionInfo.roomId);
@@ -203,13 +336,28 @@ function connect(serverUrl, roomId) {
   socket.addEventListener('error', (event) => {
     console.error('WebSocket error', event);
     updateStatus('error', { message: 'WebSocket error' });
+    stopHeartbeat();
+    if (hostAddressRequest) {
+      clearHostAddressRequest({ ok: false, error: 'connection-error' });
+    }
+    if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+      try {
+        socket.close(4001, 'error');
+      } catch (error) {
+        console.warn('Failed to close socket after error', error);
+      }
+    }
   });
 }
 
 function disconnect() {
+  stopHeartbeat();
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
+  }
+  if (hostAddressRequest) {
+    clearHostAddressRequest({ ok: false, error: 'disconnected' });
   }
   if (socket) {
     try {
@@ -255,6 +403,22 @@ async function handleServerMessage(message) {
     case 'error':
       updateStatus('error', { message: message.message });
       break;
+    case 'hostAddress': {
+      const now = Date.now();
+      updateHostAccessCache({
+        publicIp: message.publicIp || null,
+        publicUrl: message.publicUrl || null,
+        fetchedAt: now
+      }, 'server');
+      if (hostAddressRequest) {
+        if (message.publicUrl) {
+          clearHostAddressRequest({ ok: true, publicUrl: message.publicUrl, publicIp: message.publicIp || null });
+        } else {
+          clearHostAddressRequest({ ok: false, error: message.error || 'public-ip-failed' });
+        }
+      }
+      break;
+    }
     default:
       console.debug('Unhandled server message', message);
   }
@@ -273,20 +437,58 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return {
           status: connectionState,
           connection: connectionInfo,
-          syncTarget
+          syncTarget,
+          role: userRole,
+          hostAccess: hostAccessCache
         };
       case 'setSyncedTab':
         return setSyncedTab(message.tabId);
+      case 'setRole': {
+        const { role } = message;
+        if (!role || (role !== 'host' && role !== 'guest')) {
+          return { ok: false, error: 'invalid-role' };
+        }
+        userRole = role;
+        persistState();
+        safeRuntimeMessage({ type: 'roleChanged', role });
+        return { ok: true };
+      }
+      case 'getHostAddress': {
+        if (userRole !== 'host') {
+          return { ok: false, error: 'not-host' };
+        }
+        const forceRefresh = Boolean(message.forceRefresh);
+        if (isHostAccessFresh(forceRefresh)) {
+          return {
+            ok: true,
+            publicUrl: hostAccessCache.publicUrl,
+            publicIp: hostAccessCache.publicIp
+          };
+        }
+        const result = await requestHostAddressFromServer(forceRefresh);
+        if (result.ok && hostAccessCache.publicUrl) {
+          return {
+            ok: true,
+            publicUrl: hostAccessCache.publicUrl,
+            publicIp: hostAccessCache.publicIp
+          };
+        }
+        return { ok: false, error: result.error || 'public-ip-failed' };
+      }
       case 'videoEvent':
         if (!syncTarget.tabId || !sender.tab || sender.tab.id !== syncTarget.tabId) {
           return { ok: false, error: 'tab-not-selected' };
         }
         if (connectionState === 'connected' || connectionState === 'connecting') {
+          const outgoingAction = {
+            ...message.action,
+            sentAt: Date.now()
+          };
           enqueueMessage({
             type: 'action',
             roomId: connectionInfo.roomId,
             clientId,
-            action: message.action
+            action: outgoingAction
           });
           flushQueue();
           return { ok: true };
@@ -336,7 +538,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
 async function bootstrap() {
   try {
-    const stored = await chrome.storage.local.get(['connection', 'syncTarget']);
+    const stored = await chrome.storage.local.get(['connection', 'syncTarget', 'userRole', 'hostAccess']);
     if (stored.connection) {
       connectionInfo = {
         serverUrl: stored.connection.serverUrl || null,
@@ -349,6 +551,16 @@ async function bootstrap() {
         tabId: stored.syncTarget.tabId ?? null,
         title: stored.syncTarget.title || null,
         url: stored.syncTarget.url || null
+      };
+    }
+    if (stored.userRole) {
+      userRole = stored.userRole;
+    }
+    if (stored.hostAccess) {
+      hostAccessCache = {
+        publicIp: stored.hostAccess.publicIp || null,
+        publicUrl: stored.hostAccess.publicUrl || null,
+        fetchedAt: stored.hostAccess.fetchedAt || 0
       };
     }
     persistState();

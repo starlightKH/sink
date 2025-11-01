@@ -54,7 +54,8 @@
       event: eventName,
       currentTime: videoElement.currentTime,
       playbackRate: videoElement.playbackRate,
-      paused: videoElement.paused
+      paused: videoElement.paused,
+      generatedAt: Date.now()
     };
 
     const title = getVideoTitle();
@@ -71,6 +72,14 @@
     } catch (error) {
       // Ignore send errors.
     }
+
+    if (eventName === 'seeked' && videoElement && !videoElement.paused) {
+      suppressEvents = true;
+      videoElement.pause();
+      setTimeout(() => {
+        suppressEvents = false;
+      }, 150);
+    }
   }
 
   function applyAction(action) {
@@ -84,30 +93,46 @@
       suppressEvents = false;
     };
 
+    const now = Date.now();
+    const sentAt = typeof action.sentAt === 'number' ? action.sentAt : (typeof action.generatedAt === 'number' ? action.generatedAt : null);
+    const latencySeconds = sentAt ? Math.max(0, now - sentAt) / 1000 : 0;
+    const effectivePlaybackRate = typeof action.playbackRate === 'number' && !Number.isNaN(action.playbackRate)
+      ? action.playbackRate
+      : (videoElement.playbackRate || 1);
+    const baseTime = typeof action.currentTime === 'number' ? action.currentTime : videoElement.currentTime;
+    let targetTime = baseTime;
+
     switch (action.event) {
       case 'play':
-        videoElement.currentTime = action.currentTime;
-        videoElement.playbackRate = action.playbackRate;
+        if (latencySeconds > 0) {
+          targetTime += latencySeconds * effectivePlaybackRate;
+        }
+        videoElement.currentTime = targetTime;
+        videoElement.playbackRate = effectivePlaybackRate;
         videoElement.play().catch((error) => {
           console.warn('Failed to play video', error);
         }).finally(clear);
         return;
       case 'pause':
-        videoElement.currentTime = action.currentTime;
+        if (latencySeconds > 0) {
+          targetTime += latencySeconds * effectivePlaybackRate;
+        }
+        videoElement.currentTime = targetTime;
         videoElement.pause();
         break;
       case 'seeked':
-        videoElement.currentTime = action.currentTime;
+        videoElement.currentTime = baseTime;
+        videoElement.pause();
         break;
       case 'ratechange':
-        videoElement.playbackRate = action.playbackRate;
+        videoElement.playbackRate = effectivePlaybackRate;
         break;
       default:
         console.debug('Unknown remote action', action);
         break;
     }
 
-    setTimeout(clear, 150);
+    setTimeout(clear, 200);
   }
 
   chrome.runtime.onMessage.addListener((message) => {

@@ -1,4 +1,5 @@
 const http = require('http');
+const https = require('https');
 const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 8080;
@@ -7,6 +8,80 @@ const server = http.createServer();
 const wss = new WebSocket.Server({ server });
 
 const rooms = new Map();
+
+const PUBLIC_IP_ENDPOINTS = [
+  'https://api.ipify.org',
+  'https://ifconfig.me/ip',
+  'https://checkip.amazonaws.com',
+  'https://jsgetip.appspot.com'
+];
+const EXTERNAL_IP_TTL = 5 * 60 * 1000;
+let externalIpCache = { ip: null, fetchedAt: 0 };
+let externalIpPromise = null;
+
+function extractIpFromText(text) {
+  if (!text) {
+    return null;
+  }
+  const match = text.match(/((?:\d{1,3}\.){3}\d{1,3}|[A-Fa-f0-9:]{3,})/);
+  return match ? match[0] : null;
+}
+
+function fetchExternalIp(endpoint) {
+  return new Promise((resolve, reject) => {
+    const handler = endpoint.startsWith('https://') ? https : http;
+    const req = handler.get(endpoint, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        reject(new Error(`status ${res.statusCode}`));
+        return;
+      }
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      res.on('end', () => {
+        resolve(data.trim());
+      });
+    });
+    req.on('error', (error) => {
+      reject(error);
+    });
+    req.setTimeout(5000, () => {
+      req.destroy(new Error('timeout'));
+    });
+  });
+}
+
+async function resolveExternalIp(forceRefresh = false) {
+  const now = Date.now();
+  if (!forceRefresh && externalIpCache.ip && now - externalIpCache.fetchedAt < EXTERNAL_IP_TTL) {
+    return externalIpCache.ip;
+  }
+  if (externalIpPromise && !forceRefresh) {
+    return externalIpPromise;
+  }
+  externalIpPromise = (async () => {
+    for (const endpoint of PUBLIC_IP_ENDPOINTS) {
+      try {
+        const text = await fetchExternalIp(endpoint);
+        const ip = extractIpFromText(text);
+        if (ip) {
+          externalIpCache = { ip, fetchedAt: Date.now() };
+          console.log(`Resolved external IP ${ip} using ${endpoint}`);
+          return ip;
+        }
+      } catch (error) {
+        console.error(`Failed to resolve external IP via ${endpoint}:`, error.message || error);
+      }
+    }
+    return null;
+  })();
+  const result = await externalIpPromise;
+  externalIpPromise = null;
+  return result;
+}
 
 function logRoomEvent(roomId, message) {
   const timestamp = new Date().toISOString();
@@ -95,6 +170,27 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({ type: 'left', clientId: data.clientId }));
         break;
       }
+      case 'requestHostAddress': {
+        resolveExternalIp(Boolean(data.forceRefresh))
+          .then((ip) => {
+            ws.send(JSON.stringify({
+              type: 'hostAddress',
+              publicIp: ip,
+              publicUrl: ip ? `ws://${ip}:${PORT}` : null,
+              error: ip ? null : 'resolve-failed'
+            }));
+          })
+          .catch((error) => {
+            console.error('Failed to resolve external IP', error);
+            ws.send(JSON.stringify({
+              type: 'hostAddress',
+              publicIp: null,
+              publicUrl: null,
+              error: 'resolve-failed'
+            }));
+          });
+        break;
+      }
       case 'action': {
         const { action, roomId, clientId } = data;
         if (!roomId || !clientId || !action) {
@@ -107,6 +203,10 @@ wss.on('connection', (ws) => {
         const actionName = event || 'action';
         logRoomEvent(roomId, `${clientId} ${actionName} ${prettyTitle} at ${timeInfo}`);
         broadcast(roomId, { type: 'action', action, clientId }, clientId);
+        break;
+      }
+      case 'ping': {
+        ws.send(JSON.stringify({ type: 'pong' }));
         break;
       }
       default:
@@ -126,4 +226,8 @@ wss.on('connection', (ws) => {
 
 server.listen(PORT, () => {
   console.log(`Laftel sync server listening on port ${PORT}`);
+});
+
+resolveExternalIp(true).catch((error) => {
+  console.error('Initial external IP resolution failed', error);
 });
