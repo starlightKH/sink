@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>Laftel Sync</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <h1>Laftel Sync</h1>
+    <form id="connection-form">
+      <label>
+        서버 URL
+        <input type="url" id="server-url" placeholder="ws://localhost:8080" required>
+      </label>
+      <label>
+        룸 ID
+        <input type="text" id="room-id" placeholder="예: friends-room" required>
+      </label>
+      <div class="actions">
+        <button type="submit" id="connect-button">연결</button>
+        <button type="button" id="disconnect-button" class="secondary">연결 해제</button>
+      </div>
+    </form>
+    <section class="status">
+      <h2>상태</h2>
+      <p id="status-text">알 수 없음</p>
+    </section>
+    <section class="help">
+      <h2>사용 방법</h2>
+      <ol>
+        <li>동일한 룸 ID를 양쪽 PC에서 입력합니다.</li>
+        <li>동일한 서버 URL을 사용하여 연결합니다.</li>
+        <li>라프텔에서 영상을 재생하면 상대방과 동기화됩니다.</li>
+      </ol>
+    </section>
+  </main>
+  <script src="popup.js" type="module"></script>
+</body>
+</html>
