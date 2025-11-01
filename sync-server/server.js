@@ -8,6 +8,11 @@ const wss = new WebSocket.Server({ server });
 
 const rooms = new Map();
 
+function logRoomEvent(roomId, message) {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] [room ${roomId}] ${message}`);
+}
+
 function getRoom(roomId) {
   if (!rooms.has(roomId)) {
     rooms.set(roomId, new Map());
@@ -21,10 +26,12 @@ function removeClient(ws) {
     return;
   }
   const room = rooms.get(roomId);
-  if (!room) {
+  if (!room || !room.has(clientId)) {
     return;
   }
   room.delete(clientId);
+  ws.meta = { roomId: null, clientId: null };
+  logRoomEvent(roomId, `${clientId} left the room`);
   if (room.size === 0) {
     rooms.delete(roomId);
   }
@@ -79,6 +86,7 @@ wss.on('connection', (ws) => {
         room.set(clientId, ws);
         ws.meta = { roomId, clientId };
         ws.send(JSON.stringify({ type: 'joined', roomId, clientId }));
+        logRoomEvent(roomId, `${clientId} joined the room`);
         broadcast(roomId, { type: 'info', message: `${clientId} joined`, clientId }, clientId);
         break;
       }
@@ -93,6 +101,11 @@ wss.on('connection', (ws) => {
           ws.send(JSON.stringify({ type: 'error', message: 'Missing action payload' }));
           return;
         }
+        const { event, title, currentTime } = action;
+        const prettyTitle = title ? `"${title}"` : 'an unknown video';
+        const timeInfo = typeof currentTime === 'number' ? `${currentTime.toFixed(2)}s` : 'an unknown time';
+        const actionName = event || 'action';
+        logRoomEvent(roomId, `${clientId} ${actionName} ${prettyTitle} at ${timeInfo}`);
         broadcast(roomId, { type: 'action', action, clientId }, clientId);
         break;
       }

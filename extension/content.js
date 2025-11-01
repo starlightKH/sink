@@ -2,6 +2,20 @@
   let videoElement = null;
   let suppressEvents = false;
 
+  function getVideoTitle() {
+    const ogTitle = document.querySelector('meta[property="og:title"]');
+    if (ogTitle && ogTitle.content) {
+      return ogTitle.content.trim();
+    }
+
+    const heading = document.querySelector('h1');
+    if (heading && heading.textContent) {
+      return heading.textContent.trim();
+    }
+
+    return document.title || '';
+  }
+
   function findVideoElement() {
     if (videoElement && !videoElement.isConnected) {
       videoElement = null;
@@ -37,6 +51,11 @@
       playbackRate: videoElement.playbackRate,
       paused: videoElement.paused
     };
+
+    const title = getVideoTitle();
+    if (title) {
+      action.title = title;
+    }
 
     try {
       chrome.runtime.sendMessage({ type: 'videoEvent', action }, () => {
