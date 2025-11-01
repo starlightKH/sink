@@ -3,12 +3,16 @@
   "name": "Laftel Sync Controller",
   "description": "Synchronize Laftel video playback between browsers.",
   "version": "1.0.0",
-  "permissions": ["storage", "tabs"],
+  "permissions": ["storage", "tabs", "scripting"],
   "host_permissions": [
     "https://laftel.net/*",
     "https://*.laftel.net/*",
     "http://laftel.net/*",
     "http://*.laftel.net/*"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
   ],
   "background": {
     "service_worker": "background.js"

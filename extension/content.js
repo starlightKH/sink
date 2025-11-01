@@ -1,4 +1,9 @@
 (function () {
+  if (window.__syncVideoControllerInjected) {
+    return;
+  }
+  window.__syncVideoControllerInjected = true;
+
   let videoElement = null;
   let suppressEvents = false;
 
