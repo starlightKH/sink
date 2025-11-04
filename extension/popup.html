@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Laftel Sync</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <h1>Laftel Sync</h1>
+    <form id="connection-form">
+      <fieldset class="role-selector">
+        <legend>Role</legend>
+        <label class="role-option">
+          <input type="radio" name="user-role" value="host">
+          Local (host)
+        </label>
+        <label class="role-option">
+          <input type="radio" name="user-role" value="guest" checked>
+          Guest (client)
+        </label>
+      </fieldset>
+      <label>
+        Server URL
+        <input type="url" id="server-url" placeholder="ws://localhost:8080" required>
+      </label>
+      <label>
+        Room ID
+        <input type="text" id="room-id" placeholder="example: friends-room" required>
+      </label>
+      <label class="tab-picker-label">
+        Tab to sync
+        <div class="tab-picker">
+          <select id="tab-select">
+            <option value="">Select a tab</option>
+          </select>
+          <button type="button" id="refresh-tabs" class="secondary tab-refresh">Refresh</button>
+        </div>
+        <p class="tab-hint">Pick the video tab you want to keep in sync across browsers.</p>
+      </label>
+      <div class="actions">
+        <button type="submit" id="connect-button">Connect</button>
+        <button type="button" id="disconnect-button" class="secondary">Disconnect</button>
+      </div>
+    </form>
+    <section id="host-tools" class="host-tools" hidden>
+      <h2>External Access</h2>
+      <p id="host-address">Resolve the external address to share with guests.</p>
+      <div class="host-tool-buttons">
+        <button type="button" id="host-refresh" class="secondary">Refresh Address</button>
+        <button type="button" id="host-copy" class="secondary">Copy Address</button>
+      </div>
+      <p id="host-status" class="host-status"></p>
+      <p class="host-hint">Share this address (IP:8080) with guests. They should paste it into the server URL field.</p>
+    </section>
+    <section class="status">
+      <h2>Status</h2>
+      <p id="status-text">Not connected yet</p>
+    </section>
+  </main>
+  <script src="popup.js" type="module"></script>
+</body>
+</html>
